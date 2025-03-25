@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>MediaPipe BlazePose Example</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src * blob: data: mediastream: 'unsafe-inline' 'unsafe-eval'"
+    />
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        width: 100vw;
+        height: 100vh;
+        background-color: #000;
+      }
+
+      #canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+      }
+
+      #video {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: -1;
+      }
+
+      #permission-button {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 1000;
+        background-color: rgba(255, 255, 255, 0.8);
+        padding: 20px;
+        border-radius: 10px;
+      }
+
+      #debug-info {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        background-color: rgba(0, 0, 0, 0.5);
+        color: white;
+        padding: 5px;
+        border-radius: 5px;
+        font-size: 12px;
+        z-index: 100;
+        display: none;
+      }
+
+      #loading-indicator {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: white;
+        background-color: rgba(0, 0, 0, 0.7);
+        padding: 20px;
+        border-radius: 10px;
+        text-align: center;
+        font-family: Arial, sans-serif;
+        z-index: 999;
+      }
+
+      .spinner {
+        border: 4px solid rgba(255, 255, 255, 0.3);
+        border-radius: 50%;
+        border-top: 4px solid white;
+        width: 40px;
+        height: 40px;
+        margin: 10px auto;
+        animation: spin 1s linear infinite;
+      }
+
+      @keyframes spin {
+        0% {
+          transform: rotate(0deg);
+        }
+        100% {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="loading-indicator">
+      <div class="spinner"></div>
+      <div>Loading MediaPipe...</div>
+    </div>
+
+    <div id="debug-info"></div>
+
+    <div
+      id="permission-button"
+      style="text-align: center; padding: 20px; display: none"
+    >
+      <button id="request-camera" style="padding: 10px 20px; font-size: 16px">
+        Allow Camera Access
+      </button>
+      <p style="color: #666; margin-top: 10px">
+        Tap this button if camera doesn't automatically start
+      </p>
+    </div>
+
+    <video id="video" autoplay playsinline muted></video>
+
+    <canvas id="canvas"></canvas>
+
+    <script>
+      // Define global configuration object
+      window.globalConfig = {
+        enableKeyPoints: true,
+        enableSkeleton: true,
+        flipHorizontal: false,
+        isBackCamera: false,
+        isFullScreen: false,
+        color: "255, 255, 255",
+        scoreThreshold: 0.5,
+        customLandmarkSizes: {},
+        customLandmarkColors: {},
+        defaultLandmarkSize: 5,
+      };
+
+      // Define updateConfig function immediately so it's always available
+      window.updateConfig = function () {
+        if (window.POSE_CONFIG) {
+          console.log("Updating configuration from POSE_CONFIG");
+
+          // Update basic properties
+          for (const key in window.POSE_CONFIG) {
+            if (
+              key !== "customLandmarkSizes" &&
+              key !== "customLandmarkColors"
+            ) {
+              window.globalConfig[key] = window.POSE_CONFIG[key];
+            }
+          }
+
+          // Handle custom sizes
+          try {
+            let customSizes = window.POSE_CONFIG.customLandmarkSizes;
+            if (typeof customSizes === "string") {
+              customSizes = JSON.parse(customSizes);
+            }
+            window.globalConfig.customLandmarkSizes = customSizes || {};
+            console.log(
+              "Updated custom sizes:",
+              JSON.stringify(window.globalConfig.customLandmarkSizes)
+            );
+          } catch (e) {
+            console.error("Error parsing customLandmarkSizes:", e);
+          }
+
+          // Handle custom colors
+          try {
+            let customColors = window.POSE_CONFIG.customLandmarkColors;
+            if (typeof customColors === "string") {
+              customColors = JSON.parse(customColors);
+            }
+            window.globalConfig.customLandmarkColors = customColors || {};
+            console.log(
+              "Updated custom colors:",
+              JSON.stringify(window.globalConfig.customLandmarkColors)
+            );
+          } catch (e) {
+            console.error("Error parsing customLandmarkColors:", e);
+          }
+
+          console.log("Config updated successfully:", window.globalConfig);
+        } else {
+          console.log("No POSE_CONFIG available");
+        }
+      };
+
+      // Initial update if config exists
+      if (window.POSE_CONFIG) {
+        // console.log("Using pose config:", window.POSE_CONFIG);
+        window.updateConfig();
+      }
+
+      // Debugging helper function
+      window.dumpConfig = function () {
+        // console.log("Current configuration:", window.globalConfig);
+        return window.globalConfig;
+      };
+
+      // Show loading indicator
+      const loadingIndicator = document.getElementById("loading-indicator");
+
+      // Simple logging helper
+      const debugInfo = document.getElementById("debug-info");
+      function log(message) {
+        console.log(message);
+        const now = new Date().toLocaleTimeString();
+        const div = document.createElement("div");
+        div.textContent = `${now}: ${message}`;
+        debugInfo.appendChild(div);
+
+        // Keep only last 5 messages
+        while (debugInfo.children.length > 5) {
+          debugInfo.removeChild(debugInfo.firstChild);
+        }
+
+        // Also send to React Native if available
+        if (window.ReactNativeWebView) {
+          window.ReactNativeWebView.postMessage(
+            JSON.stringify({ log: message })
+          );
+        }
+      }
+
+      // For React Native WebView interaction - check if already setup
+      if (!window.hasSetupRNInteraction) {
+        window.hasSetupRNInteraction = true;
+
+        document
+          .getElementById("request-camera")
+          .addEventListener("click", function () {
+            log("Manual camera permission request");
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+              navigator.mediaDevices
+                .getUserMedia({ video: true })
+                .then(function (stream) {
+                  log("Camera permission granted");
+                  videoElement.srcObject = stream;
+                  videoElement
+                    .play()
+                    .then(() => log("Video playback started"))
+                    .catch((err) => log("Video play error: " + err.message));
+                  document.getElementById("permission-button").style.display =
+                    "none";
+                })
+                .catch(function (err) {
+                  log("Camera permission denied: " + err.message);
+                });
+            } else {
+              log("getUserMedia not supported");
+            }
+          });
+      }
+
+      // Load libraries one by one with proper error handling
+      function loadScript(src, id) {
+        return new Promise((resolve, reject) => {
+          // Check if script is already loaded
+          if (document.getElementById(id)) {
+            log(`Script ${id} already loaded`);
+            resolve(true);
+            return;
+          }
+
+          const script = document.createElement("script");
+          script.src = src;
+          script.id = id;
+          script.crossOrigin = "anonymous";
+
+          script.onload = () => {
+            log(`Loaded ${id}`);
+            resolve(true);
+          };
+
+          script.onerror = (error) => {
+            log(`Failed to load ${id}`);
+            reject(error);
+          };
+
+          document.body.appendChild(script);
+        });
+      }
+
+      // Load all libraries sequentially
+      async function loadAllLibraries() {
+        try {
+          await loadScript(
+            "https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js",
+            "camera-utils"
+          );
+          await loadScript(
+            "https://cdn.jsdelivr.net/npm/@mediapipe/control_utils@0.6/control_utils.js",
+            "control-utils"
+          );
+          await loadScript(
+            "https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3/drawing_utils.js",
+            "drawing-utils"
+          );
+          await loadScript(
+            "https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5/pose.js",
+            "pose"
+          );
+
+          // Now load our main script
+          await loadScript("script.js", "main-script");
+
+          loadingIndicator.style.display = "none";
+          log("All libraries loaded successfully");
+
+          // Notify React Native if available
+          if (window.ReactNativeWebView) {
+            window.ReactNativeWebView.postMessage(
+              JSON.stringify({ event: "librariesLoaded" })
+            );
+          }
+
+          return true;
+        } catch (error) {
+          log("Failed to load libraries: " + error.message);
+          document.getElementById("permission-button").style.display = "block";
+          loadingIndicator.style.display = "none";
+          return false;
+        }
+      }
+
+      // Start loading libraries
+      loadAllLibraries();
+
+      // Show permission button after delay if video isn't playing
+      setTimeout(function () {
+        const video = document.getElementById("video");
+        if (!video.srcObject || video.paused) {
+          log("Video not playing after timeout, showing permission button");
+          document.getElementById("permission-button").style.display = "block";
+          loadingIndicator.style.display = "none";
+        }
+      }, 5000);
+    </script>
+  </body>
+</html>
